@@ -6,3 +6,6 @@ dist/
 vite.config.js
 vite.config.d.ts
 git-meta/
+.wrangler/
+.dev.vars
+.env.local
