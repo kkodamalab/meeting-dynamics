@@ -28,7 +28,7 @@ jobs:
           npm test
       - run: npm run build
         env:
-          VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
+          VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL || 'https://meeting-dynamics-relay.kkodama-lab.workers.dev' }}
       - uses: actions/upload-pages-artifact@v3
         with: { path: ./dist }
   deploy:
