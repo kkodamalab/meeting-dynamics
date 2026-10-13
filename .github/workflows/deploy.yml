@@ -12,7 +12,23 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
+      - name: Test realtime relay
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          npm run relay:dev > /tmp/meeting-relay.log 2>&1 &
+          RELAY_PID=$!
+          trap 'kill "$RELAY_PID" || true' EXIT
+          READY=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8787/health; then READY=1; break; fi
+            sleep 1
+          done
+          if [ "$READY" -ne 1 ]; then cat /tmp/meeting-relay.log; exit 1; fi
+          npm test
       - run: npm run build
+        env:
+          VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL }}
       - uses: actions/upload-pages-artifact@v3
         with: { path: ./dist }
   deploy:
@@ -24,4 +40,3 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
-
