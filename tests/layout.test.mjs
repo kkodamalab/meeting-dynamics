@@ -26,5 +26,5 @@ test("reshaping recomputes a proportional perimeter", () => {
 test("CSV preserves comma, quotes and newline in participant name", () =>
   assert.equal(
     csv([{ name: 'A,"B"\nC', speakingSeconds: 1.2, turns: 2 }]),
-    'name,speakingSeconds,turns\r\n"A,""B""\nC",1.2,2',
+    'name,speakingSeconds,turns,unknownSeconds,confidence\r\n"A,""B""\nC",1.2,2,0,0',
   ));

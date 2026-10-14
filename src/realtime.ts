@@ -1,3 +1,4 @@
+import type { Calibration } from "./audio";
 import { useEffect, useRef, useState } from "react";
 export type Person = {
   id: number;
@@ -9,6 +10,23 @@ export type Person = {
   vad: boolean;
   talkMs: number;
   turns: number;
+  audioState?: string;
+  trackMuted?: boolean;
+  protocol?: number;
+  rawRms?: number;
+  dbfs?: number;
+  snr?: number;
+  correctedDb?: number;
+  noiseDb?: number;
+  lastSample?: number;
+  sampleDelayMs?: number;
+  seq?: number;
+  calibration?: Calibration;
+  calibrating?: boolean;
+  confidenceMs?: number;
+  startThresholdDb?: number;
+  endThresholdDb?: number;
+  settings?: Record<string, boolean | number>;
 };
 export type Snapshot = {
   id: string;
@@ -16,6 +34,12 @@ export type Snapshot = {
   elapsed: number;
   active: number | null;
   people: Person[];
+  serverTime?: number;
+  receivedAt?: number;
+  unknownMs?: number;
+  silenceMs?: number;
+  confidence?: number;
+  reason?: string;
 };
 export type Session = {
   id: string;
@@ -77,7 +101,7 @@ export function useRoom(
           const m = JSON.parse(e.data);
           if (m.type === "state") {
             attempts = 0;
-            setState(m);
+            setState({ ...m, receivedAt: Date.now() });
             setStatus("接続済み");
           }
         } catch {
