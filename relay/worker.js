@@ -221,6 +221,8 @@ export class Room {
         value,
       );
     });
+    if (this.study.recordedBytes >= this.study.byteLimit)
+      this.study.running = false;
     if (added.length) {
       const { trace, buffers, smooth, ...meta } = this.study;
       this.ctx.storage.sql.exec(
@@ -228,8 +230,6 @@ export class Room {
         JSON.stringify(meta),
       );
     }
-    if (this.study.recordedBytes >= this.study.byteLimit)
-      this.study.running = false;
     const selected =
       this.study.mode === "reference" ? this.study.B : this.study.A;
     this.room.elapsed = selected.elapsedMs;
@@ -583,6 +583,7 @@ export class Room {
           m.source === "synthetic" ? "synthetic" : "human-labeled-live";
       }
       if (m.type === "start") {
+        if(this.room.studyEnabled&&(this.study.recordedWindows>=this.study.recordingLimit||this.study.recordedBytes>=this.study.byteLimit)){ws.send(JSON.stringify({type:"study-error",message:"記録上限です。結果を出力してから新しいセッションまたはリセットを選択してください。"}));return;}
         if (
           this.room.studyEnabled &&
           this.study.mode === "reference" &&

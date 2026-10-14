@@ -303,6 +303,7 @@ export function ResearchPanel({
         </p>
         <pre>{JSON.stringify(study?.clock || {}, null, 2)}</pre>
         <p>
+          {!!study?.legacyMs&&<>旧集計{(study.legacyMs/1000).toFixed(1)}秒を保持。比較・評価は今回の取得窓のみ。<br/></>}
           記録 {study?.recordedWindows || 0} / {study?.recordingLimit || 36000}
           窓（最大60分または特徴量32MiB。上限で停止し、データを黙って破棄しません）。実機精度の向上は未検証です。
         </p>
