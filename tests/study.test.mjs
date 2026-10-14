@@ -252,3 +252,4 @@ test("unlabeled and data-missing windows have explicit evaluation coverage", () 
   assert.equal(evaluate(w, "B", 2, defaults).vadRecall, 0);
   assert.equal(evaluate([], "B", 2, defaults).speakerAccuracy, null);
 });
+test('a one-window identity blip is not a new turn, while a sustained other speaker is',()=>{const a=aggregate(2);let t=0;const add=(id,n)=>{for(let i=0;i<n;i++){account(a,{kind:'speaker',id,confidence:1,reason:''},t,100,defaults);t+=100}};add(1,4);add(2,1);add(1,4);assert.equal(a.people[0].turns,1);assert.equal(a.people[1].turns,0);add(2,3);add(1,3);assert.equal(a.people[0].turns,2);assert.equal(a.people[1].turns,1)});

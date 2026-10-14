@@ -258,7 +258,7 @@ export function account(
       if (
         !segment ||
         start - segment.lastEnd > config.gapMs ||
-        segment.lastEnd < total.lastOther
+        segment.lastEnd <= total.lastOther
       ) {
         segment = { lastEnd: start, duration: 0, counted: false };
         total.turnState[decision.id] = segment;
@@ -269,7 +269,7 @@ export function account(
         p.turns++;
         segment.counted = true;
       }
-      total.lastOther = start; // same speaker's lastEnd is newer; another speaker breaks continuity.
+      if(segment.counted)total.lastOther = start; // Only a qualified utterance interrupts another speaker.
     }
   }
 }
@@ -298,11 +298,13 @@ export function intervals(
         confidenceMs: d.confidence * w.duration,
       });
   }
-  return runs.map((r) => ({
-    ...r,
-    confidence: r.confidenceMs / (r.end - r.start),
-    validTurn: r.kind === "speaker" && r.end - r.start >= config.minTurnMs,
-  }));
+  const utterances:any[]=[];const last:Record<string,any>={};let other=0;
+  for(const r of runs){if(r.kind!=='speaker'||!r.id)continue;
+    let u=last[r.id];if(!u||r.start-u.end>config.gapMs||u.end<=other){u={id:r.id,start:r.start,end:r.start,speakingMs:0,confidenceMs:0,validTurn:false};last[r.id]=u;utterances.push(u);}
+    u.end=r.end;u.speakingMs+=r.end-r.start;u.confidenceMs+=r.confidenceMs;u.validTurn=u.speakingMs>=config.minTurnMs;
+    if(u.validTurn)other=r.end-config.windowMs;
+  }
+  return {raw:runs.map(r=>({...r,confidence:r.confidenceMs/(r.end-r.start)})),utterances:utterances.map(u=>({...u,gapMs:u.end-u.start-u.speakingMs,confidence:u.confidenceMs/u.speakingMs}))};
 }
 export function evaluate(
   windows: Window[],
