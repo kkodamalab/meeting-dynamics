@@ -396,6 +396,8 @@ export function newStudy(count: number, mode: Mode = "smartphone") {
     lastSeq: {} as Record<string, number>,
     calibration: null as any,
     calibrationError: "",
+    calibrationResults: {} as Record<string, any>,
+    calibrationRejected: {} as Record<string, string[]>,
     A: aggregate(count),
     B: aggregate(count),
     origin: 0,
@@ -413,14 +415,30 @@ export function newStudy(count: number, mode: Mode = "smartphone") {
   };
 }
 export function ingest(study: ReturnType<typeof newStudy>, feature: Feature) {
-  if (
+  const rejection =
     !Number.isInteger(feature.seq) ||
-    feature.seq <= (study.lastSeq[feature.channel] ?? -1) ||
-    !Number.isFinite(feature.acquiredAt) ||
-    feature.acquiredAt > feature.receivedAt + 200 ||
-    feature.receivedAt - feature.acquiredAt > 2000
-  )
+    feature.seq <= (study.lastSeq[feature.channel] ?? -1)
+      ? "重複／順序逆転シーケンス"
+      : !Number.isFinite(feature.acquiredAt)
+        ? "取得時刻が不正"
+        : feature.acquiredAt > feature.receivedAt + 200
+          ? "時計ずれ: 取得時刻が受信時刻より200ms超先"
+          : feature.receivedAt - feature.acquiredAt > 2000
+            ? "通信遅延／時計ずれ: 取得から受信まで2秒超"
+            : "";
+  if (rejection) {
+    const c = study.calibration;
+    if (
+      c &&
+      feature.receivedAt >= c.start &&
+      feature.receivedAt <= c.end + 2000
+    ) {
+      study.calibrationRejected ||= {};
+      const errors = (study.calibrationRejected[feature.channel] ||= []);
+      if (errors.length < 180) errors.push(rejection);
+    }
     return false;
+  }
   study.lastSeq[feature.channel] = feature.seq;
   const history = (study.buffers[feature.channel] ||= []);
   history.push(feature);
@@ -517,9 +535,14 @@ export function beginCalibration(
     end: now + (speaker === 0 ? 3000 : 5000),
   };
   study.calibrationError = "";
+  study.calibrationRejected = {};
+  delete study.calibrationResults?.[speaker];
   if (speaker === 0) {
     study.noise = {};
     study.profiles = {};
+    study.calibrationResults = {};
+  } else {
+    delete study.profiles[speaker];
   }
 }
 export function finishCalibration(
@@ -527,42 +550,135 @@ export function finishCalibration(
   now: number,
 ) {
   const c = study.calibration;
-  if (!c || now < c.end + study.config.bufferMs) return false;
+  // ingest accepts up to 2s transport delay. Wait the same budget before
+  // judging coverage, without extending the acquisition interval.
+  if (!c || now < c.end + Math.max(2000, study.config.bufferMs)) return false;
   const keys = channels(study.count),
     rms: Record<string, number> = {},
     quality: Record<string, any> = {};
   for (const key of keys) {
-    const rows = (study.buffers[key] || []).filter(
-      (f) =>
-        f.acquiredAt >= c.start &&
-        f.acquiredAt < c.end &&
-        f.healthy &&
-        f.uncertainty <= study.config.maxUncertaintyMs,
+    const received = (study.buffers[key] || []).filter(
+      (f) => f.acquiredAt >= c.start && f.acquiredAt < c.end,
     );
-    const coverage = rows.length / ((c.end - c.start) / 100);
+    const valid = received.filter(
+      (f) =>
+        f.healthy &&
+        f.uncertainty <= study.config.maxUncertaintyMs &&
+        Number.isFinite(f.rawRms) &&
+        f.rawRms >= 0 &&
+        f.rawRms <= 1,
+    );
+    // Count independent captures, not repeated transmissions of one capture.
+    // Counting captures rather than occupied rounded bins avoids boundary
+    // jitter losing every other sample. Acquisition times are clock-corrected.
+    const rows: Feature[] = [];
+    for (const f of [...valid].sort((a, b) => a.acquiredAt - b.acquiredAt))
+      if (!rows.length || f.acquiredAt - rows.at(-1)!.acquiredAt >= 50)
+        rows.push(f);
+    const expectedSamples = (c.end - c.start) / study.config.windowMs;
+    const coverage = Math.min(1, rows.length / expectedSamples);
     const values = rows.map((f) => f.rawRms);
     rms[key] = Math.max(1e-6, percentile(values, c.speaker === 0 ? 0.5 : 0.75));
+    const clippedFraction = rows.length
+      ? rows.reduce((s, f) => s + (f.clippedFraction || 0), 0) / rows.length
+      : 0;
+    const maxClippedFraction = Math.max(
+      0,
+      ...rows.map((f) => f.clippedFraction || 0),
+    );
+    const snr =
+      c.speaker === 0
+        ? null
+        : study.noise[key]
+          ? dbfs(rms[key]) - dbfs(study.noise[key])
+          : null;
+    const reasons: string[] = [];
+    const rejected = study.calibrationRejected?.[key] || [];
+    if (coverage < 0.7) reasons.push(...new Set(rejected));
+    if (
+      coverage < 0.7 &&
+      received.some((f) => f.uncertainty > study.config.maxUncertaintyMs)
+    )
+      reasons.push(
+        `時計同期不確実性が${study.config.maxUncertaintyMs}msを超過（同期を待って再測定）`,
+      );
+    if (coverage < 0.7)
+      reasons.push(
+        `受信不足: ${rows.length}/${expectedSamples} (${(coverage * 100).toFixed(1)}%)、70%以上必要`,
+      );
+    if (received.some((f) => !f.healthy))
+      reasons.push("音声処理停止／マイク消音");
+    if (
+      received.some(
+        (f) => !Number.isFinite(f.rawRms) || f.rawRms < 0 || f.rawRms > 1,
+      )
+    )
+      reasons.push("RMSが不正");
+    if (values.some((v) => v >= 0.95) || maxClippedFraction > 0.01)
+      reasons.push(
+        `飽和: 最大クリップ率 ${(maxClippedFraction * 100).toFixed(2)}%（1%以下必要）／RMS上限0.95`,
+      );
+    if (values.length && values.every((v) => v === 0))
+      reasons.push("全サンプルが完全なゼロ: マイク入力・消音を確認");
+    const spreadDb = values.length
+      ? dbfs(percentile(values, 0.9)) - dbfs(percentile(values, 0.1))
+      : null;
+    if (c.speaker === 0 && spreadDb !== null && spreadDb > 12)
+      reasons.push(
+        `無音区間の変動 ${spreadDb.toFixed(1)}dB（12dB以下必要）: 発話・突発音を避けて再測定`,
+      );
+    if (c.speaker !== 0 && snr === null) reasons.push("静音STEP未完了");
+    else if (snr !== null && snr < 6)
+      reasons.push(`発話SNR ${snr.toFixed(1)}dB（6dB以上必要）`);
     quality[key] = {
       samples: rows.length,
+      receivedSamples: received.length,
+      rejectedSamples: rejected.length,
+      expectedSamples,
       coverage,
       peak: Math.max(0, ...values),
-      snr:
+      rms: values.length
+        ? percentile(values, c.speaker === 0 ? 0.5 : 0.75)
+        : null,
+      dbfs: values.length ? dbfs(rms[key]) : null,
+      noiseRms: c.speaker === 0 ? rms[key] : (study.noise[key] ?? null),
+      noiseDb:
         c.speaker === 0
-          ? null
-          : dbfs(rms[key]) - dbfs(study.noise[key] || 1e-6),
+          ? dbfs(rms[key])
+          : study.noise[key]
+            ? dbfs(study.noise[key])
+            : null,
+      clippedFraction,
+      maxClippedFraction,
+      spreadDb,
+      snr,
+      lateSamples: received.filter((f) => f.receivedAt >= c.end).length,
+      clockRejected: received.filter(
+        (f) => f.uncertainty > study.config.maxUncertaintyMs,
+      ).length,
+      maxUncertaintyMs: Math.max(0, ...received.map((f) => f.uncertainty)),
+      maxDelayMs: Math.max(
+        0,
+        ...received.map((f) => f.receivedAt - f.acquiredAt),
+      ),
+      settings: received.at(-1)?.settings ?? {},
+      passed: reasons.length === 0,
+      reasons,
     };
-    if (
-      coverage < 0.7 ||
-      values.some((v) => v >= 0.95) ||
-      rows.some((f) => (f.clippedFraction || 0) > 0.01) ||
-      (c.speaker !== 0 && quality[key].snr < 6)
-    ) {
-      study.calibrationError = `${key === "pc" ? "PC" : key}: 受信不足・飽和・SNR不足。位置・マイクを確認して再測定`;
-      study.calibration = null;
-      return false;
-    }
   }
-  if (c.speaker === 0) study.noise = rms;
+  const failed = keys.filter((k) => !quality[k].passed);
+  study.calibrationResults ||= {};
+  study.calibrationResults[c.speaker] = {
+    speaker: c.speaker,
+    start: c.start,
+    end: c.end,
+    measuredAt: now,
+    quality,
+    passed: !failed.length,
+  };
+  if (failed.length)
+    study.calibrationError = `STEP ${c.speaker + 1} 不合格。端末別の判定理由を確認し、このSTEPを再測定してください。`;
+  else if (c.speaker === 0) study.noise = rms;
   else if (keys.some((k) => !study.noise[k]))
     study.calibrationError = "静音STEPを先に完了してください";
   else study.profiles[c.speaker] = { rms, quality, measuredAt: now };
@@ -584,6 +700,7 @@ export function studySummary(study: ReturnType<typeof newStudy>) {
     profiles: study.profiles,
     calibration: study.calibration,
     calibrationError: study.calibrationError,
+    calibrationResults: study.calibrationResults || {},
     ready:
       Object.keys(study.profiles).length === study.count &&
       channels(study.count).every((k) => study.noise[k]),

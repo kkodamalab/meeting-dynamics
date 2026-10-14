@@ -118,7 +118,9 @@ export function ResearchPanel({
           : "不使用"}{" "}
         · 共同校正 {study?.ready ? "完了" : "未完了"}
       </p>
-      <p className="hint">音声波形は送信・保存しません。表示名・座席・音声特徴量・評価ラベルを保持し、出力に含めます。セッションは12時間で削除されます。</p>
+      <p className="hint">
+        音声波形は送信・保存しません。表示名・座席・音声特徴量・評価ラベルを保持し、出力に含めます。セッションは12時間で削除されます。
+      </p>
       {mode === "reference" && (
         <div className="card pc-controls">
           <h3>PC参照マイク</h3>
@@ -195,17 +197,105 @@ export function ResearchPanel({
             <p role="status">
               {study?.calibration
                 ? `${study.calibration.speaker === 0 ? "全員無言" : people[study.calibration.speaker - 1]?.name + "のみ発話"} 測定中`
-                : study?.calibrationError ||
-                  (study?.ready
+                : study?.calibrationError
+                  ? "測定不合格（詳細は下記）"
+                  : study?.ready
                     ? "全マイクの応答ベクトル測定完了"
-                    : "各STEPを完了してください")}
+                    : "各STEPを完了してください"}
             </p>
             {study?.calibrationError && (
               <p role="alert">{study.calibrationError}</p>
             )}
+            {Object.values(study?.calibrationResults || {}).map(
+              (result: any) => (
+                <div key={result.speaker} className="calibration-quality">
+                  <h4>
+                    STEP {result.speaker + 1}{" "}
+                    {result.passed ? "合格" : "不合格"}
+                  </h4>
+                  <div style={{ overflowX: "auto" }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          {[
+                            "マイク",
+                            "受信率",
+                            "有効／受信／予定サンプル",
+                            "RMS",
+                            "dBFS",
+                            "ノイズRMS / dBFS",
+                            "飽和率 平均／最大",
+                            "SNR",
+                            "判定理由",
+                          ].map((v) => (
+                            <th key={v}>{v}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(result.quality).map(([key, value]) => {
+                          const q = value as any;
+                          const num = (v: number | null, digits = 1) =>
+                            v == null ? "—" : v.toFixed(digits);
+                          return (
+                            <tr key={key}>
+                              <td>
+                                {key === "pc"
+                                  ? "PC MIC"
+                                  : people.find((p) => String(p.id) === key)
+                                      ?.name || `スマホ${key}`}
+                              </td>
+                              <td>{num(q.coverage * 100)}%</td>
+                              <td>
+                                {q.samples} / {q.receivedSamples} /{" "}
+                                {q.expectedSamples}
+                              </td>
+                              <td>{num(q.rms, 6)}</td>
+                              <td>{num(q.dbfs)}</td>
+                              <td>
+                                {num(q.noiseRms, 6)} / {num(q.noiseDb)}
+                              </td>
+                              <td>
+                                {num(q.clippedFraction * 100, 2)}% /{" "}
+                                {num(q.maxClippedFraction * 100, 2)}%
+                              </td>
+                              <td>
+                                {q.snr == null
+                                  ? "対象外（無音測定）"
+                                  : `${num(q.snr)} dB`}
+                              </td>
+                              <td>
+                                {q.passed ? "合格" : q.reasons.join("、")}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <details>
+                    <summary>受信・時計同期・実設定の詳細</summary>
+                    {Object.entries(result.quality).map(([key, value]) => {
+                      const q = value as any;
+                      return (
+                        <p key={key}>
+                          {key === "pc" ? "PC MIC" : `スマホ${key}`}: 遅着{" "}
+                          {q.lateSamples}、時刻／シーケンスによる受信後除外{" "}
+                          {q.rejectedSamples}、時計不確実性による除外{" "}
+                          {q.clockRejected}、最大不確実性{" "}
+                          {q.maxUncertaintyMs.toFixed(0)}ms、最大遅延{" "}
+                          {q.maxDelayMs.toFixed(0)}ms、実設定{" "}
+                          {JSON.stringify(q.settings)}
+                        </p>
+                      );
+                    })}
+                  </details>
+                </div>
+              ),
+            )}
             <p>
-              無音、受信率70%未満、飽和、発話SNR 6
-              dB未満は再測定。PC再取得や位置変更後も再測定してください。位置は相対座標で、実距離・音源定位ではありません。
+              測定終了後は遅着データを最大2秒待ちます。無音STEPではSNRを要求せず、受信率70%以上、非飽和、完全ゼロではない入力、安定したノイズ（変動12dB以下）を確認します。発話STEPではさらに各マイクのSNR
+              6dB以上を確認します。失敗したSTEPのボタンで再測定できます。PC再取得や位置変更後も再測定してください。位置は相対座標で、実距離・音源定位ではありません。
             </p>
           </details>
         </div>
@@ -304,7 +394,13 @@ export function ResearchPanel({
         </p>
         <pre>{JSON.stringify(study?.clock || {}, null, 2)}</pre>
         <p>
-          {!!study?.legacyMs&&<>旧集計{(study.legacyMs/1000).toFixed(1)}秒を保持。比較・評価は今回の取得窓のみ。<br/></>}
+          {!!study?.legacyMs && (
+            <>
+              旧集計{(study.legacyMs / 1000).toFixed(1)}
+              秒を保持。比較・評価は今回の取得窓のみ。
+              <br />
+            </>
+          )}
           記録 {study?.recordedWindows || 0} / {study?.recordingLimit || 36000}
           窓（最大60分または特徴量32MiB。上限で停止し、データを黙って破棄しません）。実機精度の向上は未検証です。
         </p>

@@ -492,6 +492,9 @@ export class Room {
       if (m.type === "pc-mic" && m.mic === true && this.study) {
         this.study.profiles = {};
         this.study.noise = {};
+        this.study.calibrationResults = {};
+        this.study.calibrationError = "";
+        this.study.calibration = null;
       }
       if (m.type === "pc-mic") {
         this.room.pc ||= {
@@ -548,6 +551,7 @@ export class Room {
         m.type === "calibration-step" &&
         !this.room.running &&
         this.study?.mode === "reference" &&
+        !this.study.calibration &&
         Number.isInteger(m.speaker) &&
         m.speaker >= 0 &&
         m.speaker <= this.room.people.length
@@ -617,6 +621,7 @@ export class Room {
             config: previous.config,
             noise: previous.noise,
             profiles: previous.profiles,
+            calibrationResults: previous.calibrationResults,
             buffers: previous.buffers,
             lastSeq: previous.lastSeq,
             epoch: Date.now(),
@@ -731,7 +736,8 @@ export class Room {
         person.vad = false;
       }
     }
-    if (this.study?.calibration && finishCalibration(this.study, now)) {
+    const pendingCalibration = !!this.study?.calibration;
+    if (pendingCalibration && finishCalibration(this.study, now)) {
       for (const p of this.room.people) {
         if (this.study.noise[p.id]) {
           p.voice ||= newVoice();
@@ -756,6 +762,7 @@ export class Room {
     this.broadcast();
     if (
       !this.lastSave ||
+      (pendingCalibration && !this.study.calibration) ||
       now - this.lastSave > 5000 ||
       [
         "start",
