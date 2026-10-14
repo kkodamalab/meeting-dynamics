@@ -118,6 +118,7 @@ export function ResearchPanel({
           : "不使用"}{" "}
         · 共同校正 {study?.ready ? "完了" : "未完了"}
       </p>
+      <p className="hint">音声波形は送信・保存しません。表示名・座席・音声特徴量・評価ラベルを保持し、出力に含めます。セッションは12時間で削除されます。</p>
       {mode === "reference" && (
         <div className="card pc-controls">
           <h3>PC参照マイク</h3>

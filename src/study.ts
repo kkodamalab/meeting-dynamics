@@ -317,6 +317,7 @@ export function evaluate(
     fn = 0,
     correct = 0,
     wrong = 0,
+    assigned = 0,
     single = 0,
     labeled = 0;
   const predicted = aggregate(count),
@@ -334,8 +335,9 @@ export function evaluate(
     if (w.truth.length === 1) {
       single += w.duration;
       if (d.kind === "speaker" && d.id === w.truth[0]) correct += w.duration;
-      else if (d.kind === "speaker") wrong += w.duration;
+
     }
+    if(d.kind=== "speaker"){assigned+=w.duration;if(w.truth.length!==1||d.id!==w.truth[0])wrong+=w.duration;}
     account(predicted, d, w.start, w.duration, config);
     account(
       truth,
@@ -361,7 +363,8 @@ export function evaluate(
     vadPrecision: ratio(tp, tp + fp),
     vadRecall: ratio(tp, tp + fn),
     speakerAccuracy: ratio(correct, single),
-    misattributionRate: ratio(wrong, single),
+    assignedMs:assigned,wrongAssignedMs:wrong,
+    misattributionRate: ratio(wrong, assigned),
     speakingTimeMaeSeconds: labeled
       ? predicted.people.reduce(
           (s, p, i) => s + Math.abs(p.talkMs - truth.people[i].talkMs),
