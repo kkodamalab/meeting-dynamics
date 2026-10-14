@@ -25,7 +25,15 @@ jobs:
             sleep 1
           done
           if [ "$READY" -ne 1 ]; then cat /tmp/meeting-relay.log; exit 1; fi
-          npm test
+          set +e
+          npm test > /tmp/meeting-tests.log 2>&1
+          TEST_STATUS=$?
+          set -e
+          cat /tmp/meeting-tests.log
+          if [ "$TEST_STATUS" -ne 0 ]; then
+            python3 -c 'from pathlib import Path; text=Path("/tmp/meeting-tests.log").read_text()[-5000:]; print("::error::" + text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))'
+          fi
+          exit "$TEST_STATUS"
       - run: npm run build
         env:
           VITE_RELAY_URL: ${{ vars.VITE_RELAY_URL || 'https://meeting-dynamics-relay.kkodama-lab.workers.dev' }}
