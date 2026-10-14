@@ -679,12 +679,12 @@ function Host() {
           </div>
           <div className="actions">
             {options.csv && (
-              <button onClick={() => download("csv")}>
+              <button disabled={state?.running} onClick={() => download("csv")}>
                 CSV をダウンロード
               </button>
             )}
             {options.json && (
-              <button onClick={() => download("json")}>
+              <button disabled={state?.running} onClick={() => download("json")}>
                 JSON をダウンロード
               </button>
             )}

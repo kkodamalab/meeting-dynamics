@@ -77,7 +77,7 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
       calibration: { noiseRms: 0.001, speechRms: 0.2 },
     });
     send(host, { type: "start" });
-    await pause(100);
+    await until(()=>host.states.at(-1)?.running===true);
     for (let i = 0; i < 15; i++) {
       send(one, {
         type: "sample",
@@ -101,7 +101,7 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
     send(one,{type:'sample',rawRms:0.2,seq:16,monotonic:performance.now(),mic:true});
     await until(()=>host.states.at(-1)?.people[0].seq===16);
     send(host, { type: "stop" });
-    await pause(150);
+    await until(()=>host.states.at(-1)?.running===false);
     const state = host.states.at(-1);
     assert.equal(state.running, false);
     assert.ok(state.elapsed > 700);
@@ -122,7 +122,7 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
     assert.equal(host.states.at(-1).people[0].seq, before);
     assert.equal(two.states.at(-1).people[0].talkMs, state.people[0].talkMs);
     one.close();
-    await pause(150);
+    await until(()=>host.states.at(-1)?.people[0].connected===false);
     assert.equal(host.states.at(-1).people[0].connected, false);
     assert.equal(host.states.at(-1).people[0].mic, false);
     const reconnect = await connect(s.id, {
