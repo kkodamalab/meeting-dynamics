@@ -873,4 +873,4 @@ export class RateLimit {
     if (now - this.lastCleanup > 6 * 60 * 60_000) { this.ctx.storage.sql.exec("DELETE FROM rate_limits WHERE updated < ?", now - 24 * 60 * 60_000); this.lastCleanup = now; }
     return Response.json({ allowed: true });
   }
-}}
+}
