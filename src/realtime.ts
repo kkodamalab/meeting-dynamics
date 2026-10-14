@@ -1,3 +1,4 @@
+import type { StudySummary } from "./study-types";
 import type { Calibration } from "./audio";
 import { useEffect, useRef, useState } from "react";
 export type Person = {
@@ -13,6 +14,8 @@ export type Person = {
   audioState?: string;
   trackMuted?: boolean;
   protocol?: number;
+  peak?: number;
+  clippedFraction?: number;
   rawRms?: number;
   dbfs?: number;
   snr?: number;
@@ -34,6 +37,10 @@ export type Snapshot = {
   elapsed: number;
   active: number | null;
   people: Person[];
+  pc?: Person;
+  research?: StudySummary;
+  missingMs?: number;
+  overlapMs?: number;
   serverTime?: number;
   receivedAt?: number;
   unknownMs?: number;
@@ -46,6 +53,7 @@ export type Session = {
   hostKey: string;
   seatKeys: string[];
   endpoint: string;
+  method?: "smartphone" | "reference";
 };
 export const configuredEndpoint =
   import.meta.env.VITE_RELAY_URL || localStorage.getItem("meeting-relay") || "";
@@ -83,7 +91,14 @@ export function useRoom(
 ) {
   const [state, setState] = useState<Snapshot | null>(null),
     [status, setStatus] = useState("未接続");
+  const [error,setError]=useState("");
   const socket = useRef<WebSocket | null>(null);
+  const clock = useRef({
+    anchor: Date.now() - performance.now(),
+    offset: 0,
+    rtt: Infinity,
+  });
+  const pending = useRef(new Map<number, number>());
   useEffect(() => {
     setState(null);
     if (!endpoint || !id || !key) return;
@@ -94,12 +109,40 @@ export function useRoom(
       setStatus("接続中");
       const ws = new WebSocket(`${endpoint.replace(/^http/, "ws")}/room/${id}`);
       socket.current = ws;
-      ws.onopen = () =>
+      const ping = () => {
+        if (ws.readyState === WebSocket.OPEN) {
+          const nonce = performance.now();
+          pending.current.set(nonce, nonce);
+          ws.send(JSON.stringify({ type: "sync", nonce }));
+        }
+      };
+      ws.onopen = () => {
+        clock.current = {
+          anchor: Date.now() - performance.now(),
+          offset: 0,
+          rtt: Infinity,
+        };
         ws.send(JSON.stringify({ type: "auth", role, key, seat }));
+        ping();
+      };
+      const synchronization = setInterval(ping, 5000);
+      ws.addEventListener("close", () => clearInterval(synchronization));
       ws.onmessage = (e) => {
         try {
           const m = JSON.parse(e.data);
+          if (m.type === "sync" && pending.current.has(m.nonce)) {
+            const now = performance.now(),
+              rtt = now - m.nonce;
+            pending.current.delete(m.nonce);
+            if (rtt < clock.current.rtt) {
+              clock.current.rtt = rtt;
+              clock.current.offset =
+                m.serverTime - (clock.current.anchor + m.nonce + rtt / 2);
+            }
+          }
+          if(m.type==='study-error')setError(String(m.message));
           if (m.type === "state") {
+            if(m.running)setError("");
             attempts = 0;
             setState({ ...m, receivedAt: Date.now() });
             setStatus("接続済み");
@@ -132,10 +175,35 @@ export function useRoom(
     };
   }, [endpoint, id, role, key, seat]);
   const send = (message: object) => {
-    if (socket.current?.readyState === WebSocket.OPEN && status === "接続済み")
-      socket.current.send(JSON.stringify(message));
+    if (
+      socket.current?.readyState === WebSocket.OPEN &&
+      status === "接続済み"
+    ) {
+      const m = message as any;
+      socket.current.send(
+        JSON.stringify(
+          m.type === "sample" || m.type === "pc-sample" || m.type === "label"
+            ? {
+                ...m,
+                acquiredAt:
+                  clock.current.anchor +
+                  (m.monotonic ?? performance.now()) -
+                  (m.captureAgeMs || 0) +
+                  clock.current.offset,
+                clockOffsetMs: clock.current.offset,
+                roundTripMs: Number.isFinite(clock.current.rtt)
+                  ? clock.current.rtt
+                  : null,
+                clockUncertainty: Number.isFinite(clock.current.rtt)
+                  ? clock.current.rtt / 2
+                  : 999,
+              }
+            : m,
+        ),
+      );
+    }
   };
-  return { state, status, send };
+  return { state, status, send,error };
 }
 export function joinLink(session: Session, seat: number) {
   const u = new URL(location.pathname, location.origin);
