@@ -122,7 +122,7 @@ export function inferSpeaker(people: Candidate[], now: number) {
     };
   if (fresh.length !== participants.length)
     return { id: null, confidence: 0, reason: "受信不足", speech: true };
-  if (voiced.some((p) => !validCalibration(p.calibration!)))
+  if (fresh.some((p) => !validCalibration(p.calibration!)))
     return {
       id: null,
       confidence: 0,

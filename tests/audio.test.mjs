@@ -81,3 +81,4 @@ test("calibration missing or invalid cannot silently bias device assignment", ()
 test('AGC-like gain drift creating equivalent strong signals is withheld',()=>{const old=phone(1,.02),next=phone(2,.01*2);assert.equal(inferSpeaker([old,next],1000).id,null)});
 test('noise processing changes adaptive thresholds rather than a fixed amplitude gate',()=>{const high=updateVad(newVoice(),.001,100,{noiseRms:.01,speechRms:.1}),low=updateVad(newVoice(),.001,100,{noiseRms:.001,speechRms:.1});assert.equal(high.startThresholdDb-low.startThresholdDb,20)});
 test('muted or suspended capture is withheld even when the socket is healthy',()=>{for(const patch of [{trackMuted:true},{audioState:'suspended'}])assert.equal(inferSpeaker([phone(1,.02),{...phone(2,0),...patch}],1000).id,null)});
+test('uncalibrated quiet old phone cannot let new claim its nearby speech',()=>assert.equal(inferSpeaker([{...phone(1,0),calibration:undefined},phone(2,.02)],1000).id,null));

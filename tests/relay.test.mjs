@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import WebSocket from "ws";
 const endpoint = process.env.TEST_RELAY_URL || "http://127.0.0.1:8787";
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(predicate){const end=Date.now()+5000;while(Date.now()<end){if(predicate())return;await pause(20);}assert.fail('Expected relay acknowledgement did not arrive');}
 async function connect(id, auth) {
   const ws = new WebSocket(`${endpoint.replace("http", "ws")}/room/${id}`, {
     origin: "http://127.0.0.1:5173",
@@ -14,7 +15,7 @@ async function connect(id, auth) {
     ws.once("error", reject);
   });
   ws.send(JSON.stringify({ type: "auth", ...auth }));
-  await pause(100);
+  await until(()=>ws.states.length>0||ws.readyState===WebSocket.CLOSED);
   return ws;
 }
 const send = (ws, msg) => ws.send(JSON.stringify(msg));
@@ -96,6 +97,9 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
       send(host, { type: "tick" });
       await pause(110);
     }
+    await pause(150);
+    send(one,{type:'sample',rawRms:0.2,seq:16,monotonic:performance.now(),mic:true});
+    await until(()=>host.states.at(-1)?.people[0].seq===16);
     send(host, { type: "stop" });
     await pause(150);
     const state = host.states.at(-1);
@@ -106,7 +110,7 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
     assert.ok(state.people[0].turns >= 1);
     assert.ok(state.people[0].rawRms > 0);
     assert.ok(state.people[0].lastSample > 0);
-    assert.equal(state.people[0].seq, 15);
+    assert.equal(state.people[0].seq, 16);
     assert.equal(state.people[0].settings.autoGainControl, false);
     assert.ok(state.unknownMs > 0);
     assert.ok(state.confidence === 0 || state.confidence > 0);
