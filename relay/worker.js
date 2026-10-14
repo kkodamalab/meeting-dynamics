@@ -16,6 +16,24 @@ import {
   inferSpeaker,
   validCalibration,
 } from "../src/audio.ts";
+
+const LIMITS = {
+  createIp: { limit: 4, windowMs: 10 * 60_000 }, createGlobal: { limit: 20, windowMs: 10 * 60_000 }, createBurst: { limit: 8, windowMs: 60_000 }, wsIp: { limit: 30, windowMs: 60_000 }, wsSession: { limit: 40, windowMs: 60_000 },
+};
+const MAX_CONNECTIONS = 16, MAX_PENDING_CONNECTIONS = 12, PENDING_AUTH_MS = 15_000;
+const json = (body, status, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
+const retryResponse = (retryAfter, headers) => json({ error: "rate_limited", message: "アクセスが集中しています。しばらく待ってから、もう一度お試しください。" }, 429, { ...headers, "Retry-After": String(Math.max(1, Math.ceil(retryAfter / 1000))) });
+async function clientKey(req) {
+  // Cloudflare removes client-supplied CF-Connecting-IP before adding this header. Never trust X-Forwarded-For here.
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(req.headers.get("CF-Connecting-IP") || "unknown"));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function checkLimits(env, rules) {
+  const response = await env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName("global")).fetch("https://rate/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rules }) });
+  if (!response.ok) throw new Error("rate limiter unavailable");
+  return response.json();
+}
+
 const cors = (origin) => ({
   "Access-Control-Allow-Origin": origin,
   "Access-Control-Allow-Headers": "Content-Type",
@@ -33,24 +51,35 @@ export default {
       return new Response("Origin denied", { status: 403 });
     const headers = cors(origin || env.ALLOWED_ORIGIN);
     if (req.method === "OPTIONS") return new Response(null, { headers });
-    if (url.pathname === "/health")
-      return Response.json({ ok: true }, { headers });
+    if (url.pathname === "/health") return Response.json({ ok: true }, { headers });
     let result;
-    if (url.pathname === "/sessions" && req.method === "POST") {
-      if (Number(req.headers.get("Content-Length") || 0) > 4096)
-        return new Response("Too large", { status: 413, headers });
-      const id = crypto.randomUUID();
-      result = await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(
-        new Request("https://room/init", {
-          method: "POST",
-          body: JSON.stringify({ ...(await req.json()), id }),
-        }),
-      );
-    } else if (/^\/room\/[a-f0-9-]{36}(?:\/export)?$/.test(url.pathname)) {
-      result = await env.ROOMS.get(
-        env.ROOMS.idFromName(url.pathname.split("/")[2]),
-      ).fetch(req);
-    } else return new Response("Not found", { status: 404, headers });
+    try {
+      if (url.pathname === "/sessions" && req.method === "POST") {
+        const length = Number(req.headers.get("Content-Length") || 0);
+        if (!Number.isFinite(length) || length > 4096) return new Response("Too large", { status: 413, headers });
+        const ip = await clientKey(req);
+        const limited = await checkLimits(env, [
+          { key: `create:ip:${ip}`, ...LIMITS.createIp }, { key: "create:global", ...LIMITS.createGlobal }, { key: "create:burst", ...LIMITS.createBurst },
+        ]);
+        if (!limited.allowed) return retryResponse(limited.retryAfter, headers);
+        const raw = await req.text();
+        if (new TextEncoder().encode(raw).byteLength > 4096) return new Response("Too large", { status: 413, headers });
+        let body;
+        try { body = JSON.parse(raw); } catch { return json({ error: "invalid_request", message: "リクエスト形式が正しくありません。" }, 400, headers); }
+        const id = crypto.randomUUID();
+        result = await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(new Request("https://room/init", { method: "POST", body: JSON.stringify({ ...body, id }) }));
+      } else if (/^\/room\/[a-f0-9-]{36}(?:\/export)?$/.test(url.pathname)) {
+        const roomId = url.pathname.split("/")[2];
+        if (req.headers.get("Upgrade") === "websocket") {
+          const ip = await clientKey(req);
+          const limited = await checkLimits(env, [{ key: `ws:ip:${ip}`, ...LIMITS.wsIp }, { key: `ws:room:${roomId}`, ...LIMITS.wsSession }]);
+          if (!limited.allowed) return retryResponse(limited.retryAfter, headers);
+        }
+        result = await env.ROOMS.get(env.ROOMS.idFromName(roomId)).fetch(req);
+      } else return new Response("Not found", { status: 404, headers });
+    } catch {
+      return json({ error: "protection_unavailable", message: "保護機能を初期化できません。時間をおいて再試行してください。" }, 503, headers);
+    }
     if (result.status === 101) return result;
     return new Response(result.body, {
       status: result.status,
@@ -188,9 +217,14 @@ export class Room {
       return new Response("Session expired", { status: 410 });
     if (req.headers.get("Upgrade") !== "websocket")
       return new Response("WebSocket required", { status: 426 });
+    const sockets = this.ctx.getWebSockets();
+    const pending = sockets.filter((socket) => socket.deserializeAttachment()?.role === "pending").length;
+    if (sockets.length >= MAX_CONNECTIONS) return new Response("Session connection limit reached", { status: 429 });
+    if (pending >= MAX_PENDING_CONNECTIONS) return new Response("Too many connections awaiting authentication", { status: 429 });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
-    pair[1].serializeAttachment({ role: "pending" });
+    pair[1].serializeAttachment({ role: "pending", connectedAt: Date.now() });
+    await this.scheduleAlarm();
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
   async persistStudy() {
@@ -372,6 +406,7 @@ export class Room {
     }
     let a = ws.deserializeAttachment();
     if (a.role === "pending") {
+      if (Date.now() - a.connectedAt > PENDING_AUTH_MS) { ws.close(1008, "Authentication timeout"); return; }
       if (m.type !== "auth") {
         ws.close(1008, "Authentication required");
         return;
@@ -807,10 +842,35 @@ export class Room {
   async webSocketError(ws) {
     await this.webSocketClose(ws);
   }
+  async scheduleAlarm() {
+    if (!this.room) return;
+    const nextPending = this.ctx.getWebSockets().filter((ws) => ws.deserializeAttachment()?.role === "pending").map((ws) => ws.deserializeAttachment().connectedAt + PENDING_AUTH_MS).reduce((next, deadline) => Math.min(next, deadline), this.room.expires);
+    await this.ctx.storage.setAlarm(Math.min(this.room.expires, nextPending));
+  }
   async alarm() {
-    for (const ws of this.ctx.getWebSockets())
-      ws.close(1000, "Session expired");
-    await this.ctx.storage.deleteAll();
-    this.room = null;
+    if (!this.room || Date.now() >= this.room.expires) {
+      for (const ws of this.ctx.getWebSockets()) ws.close(1000, "Session expired");
+      await this.ctx.storage.deleteAll(); this.room = null; return;
+    }
+    const now = Date.now();
+    for (const ws of this.ctx.getWebSockets()) { const attachment = ws.deserializeAttachment(); if (attachment?.role === "pending" && now - attachment.connectedAt >= PENDING_AUTH_MS) ws.close(1008, "Authentication timeout"); }
+    await this.scheduleAlarm();
+  }
+}
+export class RateLimit {
+  constructor(ctx) { this.ctx = ctx; ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, window INTEGER NOT NULL, count INTEGER NOT NULL, updated INTEGER NOT NULL)"); this.lastCleanup = 0; }
+  async fetch(req) {
+    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    let body; try { body = await req.json(); } catch { return new Response("Invalid JSON", { status: 400 }); }
+    if (!Array.isArray(body.rules) || body.rules.length < 1 || body.rules.length > 5) return new Response("Invalid rules", { status: 400 });
+    const now = Date.now();
+    const rules = body.rules.filter((rule) => typeof rule?.key === "string" && rule.key.length <= 160 && Number.isInteger(rule.limit) && rule.limit > 0 && rule.limit <= 1000 && Number.isInteger(rule.windowMs) && rule.windowMs >= 1_000 && rule.windowMs <= 86_400_000);
+    if (rules.length !== body.rules.length) return new Response("Invalid rules", { status: 400 });
+    const evaluated = rules.map((rule) => { const window = Math.floor(now / rule.windowMs); const row = Array.from(this.ctx.storage.sql.exec("SELECT window, count FROM rate_limits WHERE key=?", rule.key))[0]; return { ...rule, window, count: row?.window === window ? Number(row.count) : 0 }; });
+    const denied = evaluated.find((rule) => rule.count >= rule.limit);
+    if (denied) return Response.json({ allowed: false, retryAfter: denied.windowMs - (now % denied.windowMs) });
+    for (const rule of evaluated) this.ctx.storage.sql.exec("INSERT OR REPLACE INTO rate_limits (key,window,count,updated) VALUES (?,?,?,?)", rule.key, rule.window, rule.count + 1, now);
+    if (now - this.lastCleanup > 6 * 60 * 60_000) { this.ctx.storage.sql.exec("DELETE FROM rate_limits WHERE updated < ?", now - 24 * 60 * 60_000); this.lastCleanup = now; }
+    return Response.json({ allowed: true });
   }
 }
