@@ -8,6 +8,7 @@ export type StudySummary = {
   profiles: Record<string, any>;
   calibration: { speaker: number; start: number; end: number } | null;
   calibrationError: string;
+  calibrationResults?: Record<string, any>;
   ready: boolean;
   A: any;
   B: any;

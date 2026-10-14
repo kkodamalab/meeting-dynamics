@@ -89,13 +89,13 @@ test("PC + 2 smartphones calibrate over real WebSockets, align, store, export an
       }
     };
     send(host, { type: "calibration-step", speaker: 0 });
-    await run(3500, [0.001, 0.01, 0.001]);
+    await run(5300, [0.001, 0.01, 0.001]);
     await until(() => host.state.research.noise.pc);
     send(host, { type: "calibration-step", speaker: 1 });
-    await run(5500, [0.06, 0.09, 0.03]);
+    await run(7300, [0.06, 0.09, 0.03]);
     await until(() => host.state.research.profiles[1]);
     send(host, { type: "calibration-step", speaker: 2 });
-    await run(5500, [0.009, 0.6, 0.03]);
+    await run(7300, [0.009, 0.6, 0.03]);
     await until(() => host.state.research.ready);
     send(host, { type: "start" });
     await until(() => host.state.running);

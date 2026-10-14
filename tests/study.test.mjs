@@ -152,8 +152,8 @@ test("turn count uses minimum duration and merges short gaps, while time buckets
 test("noise calibration requires all microphones, coverage and non-saturation", () => {
   const s = fixture();
   s.calibration = { speaker: 0, start: 1000, end: 4000 };
-  assert.equal(finishCalibration(s, 4400), false);
-  assert.match(s.calibrationError, /受信不足/);
+  assert.equal(finishCalibration(s, 6000), false);
+  assert.match(s.calibrationResults[0].quality.pc.reasons.join(), /受信不足/);
 });
 test("same known 35-second trace evaluates both methods and reports synthetic provenance", () => {
   const s = fixture(10),
