@@ -79,7 +79,14 @@ export async function createSession(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ count }),
   });
-  if (!r.ok) throw new Error(`中継接続エラー (${r.status})`);
+  if (!r.ok) {
+    let message = `中継接続エラー (${r.status})`;
+    try {
+      const body = await r.json();
+      if (typeof body?.message === "string") message = body.message;
+    } catch {}
+    throw new Error(message);
+  }
   return { ...(await r.json()), endpoint: url };
 }
 export function useRoom(
