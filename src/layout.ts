@@ -42,13 +42,19 @@ export function initialLayout(count: number, shape: "circle" | "rect"): Layout {
   };
 }
 export function csv(
-  rows: { name: string; speakingSeconds: number; turns: number }[],
+  rows: {
+    name: string;
+    speakingSeconds: number;
+    turns: number;
+    unknownSeconds?: number;
+    confidence?: number;
+  }[],
 ) {
   return [
-    "name,speakingSeconds,turns",
+    "name,speakingSeconds,turns,unknownSeconds,confidence",
     ...rows.map(
       (r) =>
-        `"${r.name.replaceAll('"', '""')}",${r.speakingSeconds},${r.turns}`,
+        `"${r.name.replaceAll('"', '""')}",${r.speakingSeconds},${r.turns},${r.unknownSeconds ?? 0},${r.confidence ?? 0}`,
     ),
   ].join("\r\n");
 }

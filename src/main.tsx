@@ -1,3 +1,12 @@
+import {
+  newVoice,
+  updateVad,
+  validCalibration,
+  percentile,
+  dbfs,
+  type Calibration,
+} from "./audio";
+import { AudioDiagnostics } from "./AudioDiagnostics";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import QRCode from "qrcode";
@@ -329,6 +338,8 @@ function Host() {
       name: p.name,
       speakingSeconds: +(p.talkMs / 1000).toFixed(1),
       turns: p.turns,
+      unknownSeconds: +((state?.unknownMs || 0) / 1000).toFixed(2),
+      confidence: p.talkMs ? (p.confidenceMs || 0) / p.talkMs : 0,
     }));
     const url = URL.createObjectURL(
       new Blob([kind === "csv" ? csv(rows) : JSON.stringify(rows, null, 2)], {
@@ -341,7 +352,8 @@ function Host() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  const total = people.reduce((s, p) => s + p.talkMs, 0) || 1;
+  const total =
+    people.reduce((s, p) => s + p.talkMs, 0) + (state?.unknownMs || 0) || 1;
   const connected = status === "接続済み";
   return (
     <main>
@@ -564,7 +576,9 @@ function Host() {
           </div>
           <p>
             接続した参加者の実際のマイク音量・VADで集計します。
-            {people.filter((p) => p.connected && p.registered && p.mic).length}{" "}
+            {
+              people.filter((p) => p.connected && p.registered && p.mic).length
+            }{" "}
             人がマイク接続中
           </p>
           <div className="dashboard">
@@ -600,6 +614,12 @@ function Host() {
               ))}
             </div>
           </div>
+          <AudioDiagnostics people={people} state={state} />
+          <p>
+            話者不明 {format(state?.unknownMs || 0)} · 判定信頼度{" "}
+            {Math.round((state?.confidence || 0) * 100)}% ·{" "}
+            {state?.reason || "無音"}
+          </p>
           <div className="actions">
             <button
               disabled={
@@ -636,6 +656,10 @@ function Host() {
       {page === "report" && (
         <section>
           <h1>会議のふり返り</h1>
+          <p>
+            話者不明 {format(state?.unknownMs || 0)} · 無音／受信不足{" "}
+            {format(state?.silenceMs || 0)}
+          </p>
           <p>全体 {format(state?.elapsed || 0)}</p>
           <div className="card">
             {people.map((p) => (
@@ -689,10 +713,28 @@ function Participant({ params }: { params: URLSearchParams }) {
     [level, setLevel] = useState(0),
     [joined, setJoined] = useState(false),
     [error, setError] = useState("");
+  const [processing, setProcessing] = useState({
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+  });
+  const [settings, setSettings] = useState<MediaTrackSettings>({});
+  const [calibration, setCalibration] = useState<Calibration | undefined>();
+  const calibrationRef = useRef<Calibration | undefined>(undefined);
+  const draft = useRef({ noiseRms: 0, speechRms: 0 });
+  const voice = useRef(newVoice());
+  const [phase, setPhase] = useState("");
+  const [calibrationNote, setCalibrationNote] = useState("");
+  const collection = useRef<{
+    kind: "noise" | "speech";
+    start: number;
+    values: number[];
+  } | null>(null);
+  const sequence = useRef(0);
   const media = useRef<MediaStream | null>(null),
     audio = useRef<AudioContext | null>(null),
     interval = useRef<ReturnType<typeof setInterval> | null>(null),
-    sample = useRef({ level: 0, vad: false });
+    sample = useRef({ level: 0, vad: false, rawRms: 0, captured: 0 });
   const stop = () => {
     if (interval.current) clearInterval(interval.current);
     media.current?.getTracks().forEach((t) => t.stop());
@@ -700,7 +742,9 @@ function Participant({ params }: { params: URLSearchParams }) {
     media.current = null;
     audio.current = null;
     setMic(false);
-    sample.current = { level: 0, vad: false };
+    sample.current = { level: 0, vad: false, rawRms: 0, captured: 0 };
+    collection.current = null;
+    setPhase("");
     setLevel(0);
     send({ type: "mic", mic: false });
   };
@@ -715,11 +759,25 @@ function Participant({ params }: { params: URLSearchParams }) {
   useEffect(() => {
     if (status !== "接続済み" || !mic) return;
     const id = setInterval(
-      () => send({ type: "sample", ...sample.current, mic: true }),
+      () =>
+        send({
+          type: "sample",
+          ...sample.current,
+          mic: true,
+          seq: ++sequence.current,
+          monotonic: performance.now(),
+          captureAgeMs: performance.now() - sample.current.captured,
+          settings,
+          audioState: audio.current?.state,
+          trackMuted: media.current?.getAudioTracks()[0]?.muted,
+          calibrating: !!collection.current,
+        }),
       100,
     );
     return () => clearInterval(id);
-  }, [status, mic]);
+    if (calibrationRef.current)
+      send({ type: "calibration", calibration: calibrationRef.current });
+  }, [status, mic, settings]);
   useEffect(() => {
     if (status === "接続済み" && joined) send({ type: "register", name, mic });
   }, [status]);
@@ -730,28 +788,73 @@ function Participant({ params }: { params: URLSearchParams }) {
         throw new Error("HTTPS とマイク対応ブラウザが必要です");
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: { ideal: processing.echoCancellation },
+          noiseSuppression: { ideal: processing.noiseSuppression },
+          autoGainControl: { ideal: processing.autoGainControl },
         },
       });
       media.current = stream;
+      setSettings(stream.getAudioTracks()[0].getSettings());
+      voice.current = newVoice();
+      calibrationRef.current = undefined;
+      setCalibration(undefined);
+      draft.current = { noiseRms: 0, speechRms: 0 };
+      send({ type: "calibration-reset" });
       const ctx = new AudioContext();
       audio.current = ctx;
       await ctx.resume();
       const an = ctx.createAnalyser();
       an.fftSize = 2048;
       ctx.createMediaStreamSource(stream).connect(an);
-      const buf = new Uint8Array(an.fftSize);
+      const buf = new Float32Array(an.fftSize);
       interval.current = setInterval(() => {
-        an.getByteTimeDomainData(buf);
-        const n = Math.round(
-          (Math.sqrt(buf.reduce((s, x) => s + (x - 128) ** 2, 0) / buf.length) /
-            128) *
-            100,
-        );
-        sample.current = { level: n, vad: n > 8 };
-        setLevel(n);
+        if (ctx.state !== "running" || stream.getAudioTracks()[0].muted) return;
+        an.getFloatTimeDomainData(buf);
+        const rms = Math.sqrt(buf.reduce((s, x) => s + x * x, 0) / buf.length);
+        const f = updateVad(voice.current, rms, 100, calibrationRef.current);
+        sample.current = {
+          level: rms * 100,
+          vad: f.vad,
+          rawRms: rms,
+          captured: performance.now(),
+        };
+        setLevel(rms * 100);
+        const c = collection.current;
+        if (c) {
+          c.values.push(rms);
+          if (performance.now() - c.start >= 3000) {
+            collection.current = null;
+            setPhase("");
+            if (c.values.length < 15) {
+              setError(
+                "十分な測定データがありません。画面を開いたまま再測定してください。",
+              );
+              return;
+            }
+            if (c.kind === "noise") {
+              draft.current.noiseRms = Math.max(
+                1e-6,
+                percentile(c.values, 0.5),
+              );
+              setCalibrationNote(
+                "静音測定完了。次に本人だけが普段の声で発話してください。",
+              );
+            } else {
+              draft.current.speechRms = percentile(c.values, 0.75);
+              const result = { ...draft.current };
+              if (validCalibration(result)) {
+                calibrationRef.current = result;
+                setCalibration(result);
+                voice.current = newVoice();
+                send({ type: "calibration", calibration: result });
+                setCalibrationNote("キャリブレーション完了");
+              } else
+                setError(
+                  "発話とノイズの差が小さすぎます。スマホを本人に近づけ、静音測定からやり直してください。",
+                );
+            }
+          }
+        }
       }, 100);
       stream.getAudioTracks()[0].onended = stop;
       setMic(true);
@@ -787,11 +890,90 @@ function Participant({ params }: { params: URLSearchParams }) {
             {mic ? "マイクを停止" : "マイクを許可"}
           </button>
           <p>{mic ? "マイク OK" : "マイク待ち"}</p>
+          <fieldset disabled={mic}>
+            <legend>マイク処理（変更後は停止・再取得・再測定）</legend>
+            {Object.entries(processing).map(([key, value]) => (
+              <label key={key}>
+                <input
+                  type="checkbox"
+                  checked={value}
+                  onChange={(e) =>
+                    setProcessing((o) => ({ ...o, [key]: e.target.checked }))
+                  }
+                />
+                {key}
+              </label>
+            ))}
+          </fieldset>
+          <p>
+            実際の設定:{" "}
+            {["echoCancellation", "noiseSuppression", "autoGainControl"]
+              .map(
+                (k) =>
+                  `${k}: ${settings[k] === undefined ? "不明／非対応" : String(settings[k])}`,
+              )
+              .join(" · ")}
+          </p>
+          <div className="calibration">
+            <p>
+              計測前に、端末の位置を固定して1台ずつ測定してください。発話測定中は本人だけが話してください。
+            </p>
+            <button
+              disabled={!mic || !!phase || !!state?.running}
+              onClick={() => {
+                calibrationRef.current = undefined;
+                setCalibration(undefined);
+                send({ type: "calibration-reset" });
+                collection.current = {
+                  kind: "noise",
+                  start: performance.now(),
+                  values: [],
+                };
+                setPhase("静かな状態を3秒測定中");
+              }}
+            >
+              静音を測定（3秒）
+            </button>
+            <button
+              disabled={
+                !mic || !!phase || !!state?.running || !draft.current.noiseRms
+              }
+              onClick={() => {
+                collection.current = {
+                  kind: "speech",
+                  start: performance.now(),
+                  values: [],
+                };
+                setPhase("本人の発話を3秒測定中");
+              }}
+            >
+              本人の発話を測定（3秒）
+            </button>
+            <p>{calibrationNote}</p>
+            <p role="status">
+              {phase ||
+                (calibration
+                  ? "補正設定済み"
+                  : "未キャリブレーション：話者推定を保留")}
+            </p>
+            <p>
+              生RMS {sample.current.rawRms.toFixed(5)} ·{" "}
+              {dbfs(sample.current.rawRms).toFixed(1)} dBFS · 補正後{" "}
+              {calibration
+                ? updateVad(
+                    { ...voice.current },
+                    sample.current.rawRms,
+                    0,
+                    calibration,
+                  ).correctedDb.toFixed(1) + " dB（本人基準）"
+                : "未設定"}
+            </p>
+          </div>
           <div className="meter">
             <i style={{ width: `${level}%` }} />
           </div>
           <p>
-            VAD 状態：<b>{level > 8 ? "発話中" : "無音"}</b>
+            VAD 状態：<b>{sample.current.vad ? "発話中" : "無音"}</b>
           </p>
           <button
             className="primary"

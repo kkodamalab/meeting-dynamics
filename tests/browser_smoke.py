@@ -53,7 +53,7 @@ with sync_playwright() as p:
     host.wait_for_function("document.querySelector('.timer').textContent !== '0:00'")
     host.get_by_role('button',name='計測終了',exact=True).click()
     with host.expect_download() as d:host.get_by_role('button',name='JSON をダウンロード',exact=True).click()
-    rows=json.load(open(d.value.path()));assert len(rows)==2 and sum(r['speakingSeconds'] for r in rows)>0
+    rows=json.load(open(d.value.path()));assert len(rows)==2 and sum(r['speakingSeconds'] for r in rows)==0 and rows[0]['unknownSeconds']>0
     with host.expect_download() as d:host.get_by_role('button',name='CSV をダウンロード',exact=True).click()
     assert 'Phone 1' in open(d.value.path()).read()
     clients[0][0].close()

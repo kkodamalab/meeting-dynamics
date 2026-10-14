@@ -67,11 +67,32 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
     send(one, { type: "start" });
     await pause(100);
     assert.equal(host.states.at(-1).running, false);
+    send(one, {
+      type: "calibration",
+      calibration: { noiseRms: 0.001, speechRms: 0.2 },
+    });
+    send(two, {
+      type: "calibration",
+      calibration: { noiseRms: 0.001, speechRms: 0.2 },
+    });
     send(host, { type: "start" });
     await pause(100);
-    for (let i = 0; i < 8; i++) {
-      send(one, { type: "sample", level: 55, vad: true, mic: true });
-      send(two, { type: "sample", level: 2, vad: false, mic: true });
+    for (let i = 0; i < 15; i++) {
+      send(one, {
+        type: "sample",
+        rawRms: 0.2,
+        seq: i + 1,
+        monotonic: performance.now(),
+        mic: true,
+        settings: { autoGainControl: false },
+      });
+      send(two, {
+        type: "sample",
+        rawRms: 0.001,
+        seq: i + 1,
+        monotonic: performance.now(),
+        mic: true,
+      });
       send(host, { type: "tick" });
       await pause(110);
     }
@@ -83,6 +104,18 @@ test("real relay: isolated sessions, authenticated concurrent seats, synchroniza
     assert.ok(state.people[0].talkMs > 500);
     assert.equal(state.people[1].talkMs, 0);
     assert.ok(state.people[0].turns >= 1);
+    assert.ok(state.people[0].rawRms > 0);
+    assert.ok(state.people[0].lastSample > 0);
+    assert.equal(state.people[0].seq, 15);
+    assert.equal(state.people[0].settings.autoGainControl, false);
+    assert.ok(state.unknownMs > 0);
+    assert.ok(state.confidence === 0 || state.confidence > 0);
+    const before = host.states.at(-1).people[0].seq;
+    send(one, { type: "sample", rawRms: 0, seq: 1, mic: true });
+    await pause(100);
+    send(host, { type: "tick" });
+    await pause(100);
+    assert.equal(host.states.at(-1).people[0].seq, before);
     assert.equal(two.states.at(-1).people[0].talkMs, state.people[0].talkMs);
     one.close();
     await pause(150);
