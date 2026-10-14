@@ -68,7 +68,7 @@ export default {
         try { body = JSON.parse(raw); } catch { return json({ error: "invalid_request", message: "リクエスト形式が正しくありません。" }, 400, headers); }
         const id = crypto.randomUUID();
         result = await env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(new Request("https://room/init", { method: "POST", body: JSON.stringify({ ...body, id }) }));
-      } else if (/^\\/room\\/[a-f0-9-]{36}(?:\\/export)?$/.test(url.pathname)) {
+      } else if (/^\/room\/[a-f0-9-]{36}(?:\/export)?$/.test(url.pathname)) {
         const roomId = url.pathname.split("/")[2];
         if (req.headers.get("Upgrade") === "websocket") {
           const ip = await clientKey(req);
