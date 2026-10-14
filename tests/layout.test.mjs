@@ -26,5 +26,13 @@ test("reshaping recomputes a proportional perimeter", () => {
 test("CSV preserves comma, quotes and newline in participant name", () =>
   assert.equal(
     csv([{ name: 'A,"B"\nC', speakingSeconds: 1.2, turns: 2 }]),
-    'name,speakingSeconds,turns,unknownSeconds,confidence\r\n"A,""B""\nC",1.2,2,0,0',
+    'name,speakingSeconds,turns,unknownSeconds,confidence,method,pcEnabled,pcSettings,calibration,missingSeconds,overlapSeconds\r\n"A,""B""\nC",1.2,2,0,0,smartphone,false,"{}","null",0,0',
   ));
+for (const count of [2, 5, 10])
+  test(`PC relative position is a separate saved marker for ${count} seats`, () => {
+    const layout = initialLayout(count, "circle");
+    layout.pcPosition = { x: 31, y: 72 };
+    const restored = JSON.parse(JSON.stringify(layout));
+    assert.equal(restored.positions.length, count);
+    assert.deepEqual(restored.pcPosition, { x: 31, y: 72 });
+  });

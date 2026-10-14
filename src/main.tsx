@@ -1,3 +1,6 @@
+import { ResearchPanel } from "./ResearchPanel";
+import { useReferenceMic } from "./useReferenceMic";
+import type { Mode } from "./study";
 import {
   newVoice,
   updateVad,
@@ -71,15 +74,17 @@ function Room({
   setLayout,
   active,
   links,
+  pc = false,
 }: {
   people: Person[];
   layout: Layout;
   setLayout?: (l: Layout) => void;
   active?: number | null;
   links?: string[];
+  pc?: boolean;
 }) {
   const drag = useRef<{
-    kind: "seat" | "move" | "resize";
+    kind: "seat" | "move" | "resize" | "pc";
     id?: number;
     start: Position;
     layout: Layout;
@@ -95,7 +100,7 @@ function Room({
   };
   const down = (
     e: React.PointerEvent,
-    kind: "seat" | "move" | "resize",
+    kind: "seat" | "move" | "resize" | "pc",
     id?: number,
   ) => {
     if (!setLayout) return;
@@ -116,7 +121,12 @@ function Room({
       dx = p.x - d.start.x,
       dy = p.y - d.start.y;
     const next = structuredClone(d.layout);
-    if (d.kind === "seat")
+    if (d.kind === "pc") {
+      next.pcPosition = {
+        x: Math.max(3, Math.min(97, (d.layout.pcPosition?.x || 50) + dx)),
+        y: Math.max(3, Math.min(97, (d.layout.pcPosition?.y || 50) + dy)),
+      };
+    } else if (d.kind === "seat")
       next.positions[d.id! - 1] = {
         x: Math.max(5, Math.min(95, d.layout.positions[d.id! - 1].x + dx)),
         y: Math.max(5, Math.min(95, d.layout.positions[d.id! - 1].y + dy)),
@@ -197,6 +207,19 @@ function Room({
           </button>
         )}
       </div>
+      {pc && (
+        <div
+          className="pc-mic-marker"
+          aria-label="PC MIC位置"
+          style={{
+            left: `${layout.pcPosition?.x ?? 50}%`,
+            top: `${layout.pcPosition?.y ?? 50}%`,
+          }}
+          onPointerDown={(e) => down(e, "pc")}
+        >
+          🎙 PC MIC
+        </div>
+      )}
       {people.map((p, i) => (
         <div
           key={p.id}
@@ -264,18 +287,42 @@ function Host() {
     [seat, setSeat] = useState(1);
   const [layout, setLayout] = useState<Layout>(initialLayout(5, "circle")),
     [notice, setNotice] = useState("");
+  const [identification, setIdentification] = useState<Mode>("smartphone");
   const [options, setOptions] = useState({
     turns: true,
     average: true,
     csv: true,
     json: true,
   });
-  const { state, status, send } = useRoom(
+  const { state, status, send,error:protocolError } = useRoom(
     session?.endpoint || "",
     session?.id || "",
     "host",
     session?.hostKey || "",
   );
+  const pcMic = useReferenceMic(
+    send,
+    identification === "reference",
+    session?.id || "",
+    status,
+  );
+  useEffect(() => {
+    if (status === "接続済み" && session && page !== "home") {
+      setSession(current=>current&&current.method!==identification?{...current,method:identification}:current);
+      localStorage.setItem(
+        "meeting-session",
+        JSON.stringify({ ...session, method: identification }),
+      );
+      send({
+        type: "configure-study",
+        mode: identification,
+        layout: {
+          ...layout,
+          pcPosition: layout.pcPosition || { x: 50, y: 50 },
+        },
+      });
+    }
+  }, [status, session?.id, identification, page]);
   const people =
     state?.people ||
     Array.from({ length: count }, (_, i) => ({
@@ -290,11 +337,11 @@ function Host() {
       turns: 0,
     }));
   useEffect(() => {
-    if (page === "live" && state?.running) {
+    if ((page === "live" && state?.running) || state?.research?.calibration) {
       const id = setInterval(() => send({ type: "tick" }), 100);
       return () => clearInterval(id);
     }
-  }, [page, state?.running, status]);
+  }, [page, state?.running, state?.research?.calibration, status]);
   const restoreLayout = (n: number, s: "circle" | "rect") => {
     try {
       const saved = JSON.parse(
@@ -310,6 +357,7 @@ function Host() {
     setError("");
     try {
       const result = await createSession(endpoint, count);
+      result.method = identification;
       setSession(result);
       localStorage.setItem("meeting-session", JSON.stringify(result));
       localStorage.setItem("meeting-relay", result.endpoint);
@@ -331,7 +379,14 @@ function Host() {
       `meeting-layout-${people.length}-${layout.shape}`,
       JSON.stringify(layout),
     );
-    setNotice("配置を保存しました。次回の同じ人数・図形で復元します。");
+    send({
+      type: "configure-study",
+      mode: identification,
+      layout: { ...layout, pcPosition: layout.pcPosition || { x: 50, y: 50 } },
+    });
+    setNotice(
+      "配置を保存しました。セッションと次回の同じ人数・図形へ復元します。",
+    );
   };
   const download = (kind: "csv" | "json") => {
     const rows = people.map((p) => ({
@@ -340,6 +395,12 @@ function Host() {
       turns: p.turns,
       unknownSeconds: +((state?.unknownMs || 0) / 1000).toFixed(2),
       confidence: p.talkMs ? (p.confidenceMs || 0) / p.talkMs : 0,
+      missingSeconds: (state?.missingMs || 0) / 1000,
+      overlapSeconds: (state?.overlapMs || 0) / 1000,
+      method: identification,
+      pcEnabled: identification === "reference" && !!state?.pc?.mic,
+      pcSettings: state?.pc?.settings || {},
+      calibration: state?.research?.profiles || p.calibration || null,
     }));
     const url = URL.createObjectURL(
       new Blob([kind === "csv" ? csv(rows) : JSON.stringify(rows, null, 2)], {
@@ -353,7 +414,9 @@ function Host() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   const total =
-    people.reduce((s, p) => s + p.talkMs, 0) + (state?.unknownMs || 0) || 1;
+    people.reduce((s, p) => s + p.talkMs, 0) +
+      (state?.unknownMs || 0) +
+      (state?.overlapMs || 0) || 1;
   const connected = status === "接続済み";
   return (
     <main>
@@ -363,9 +426,9 @@ function Host() {
         </button>
         <span role="status">{session ? status : "セッション未作成"}</span>
       </header>
-      {error && (
+      {(error||protocolError) && (
         <p role="alert" className="error">
-          {error}
+          {error||protocolError}
         </p>
       )}
       {page === "home" && (
@@ -397,6 +460,18 @@ function Host() {
                 <option value="rect">長方形（初期は正方形）</option>
               </select>
             </label>
+            <label>
+              話者識別方式
+              <select
+                aria-label="話者識別方式"
+                disabled={!!state?.running}
+                value={identification}
+                onChange={(e) => setIdentification(e.target.value as Mode)}
+              >
+                <option value="smartphone">SMARTPHONE ONLY</option>
+                <option value="reference">SMARTPHONE + PC REFERENCE</option>
+              </select>
+            </label>
             <label className="relay-field">
               中継サーバー URL
               <input
@@ -424,7 +499,7 @@ function Host() {
             </div>
             <button
               className="primary"
-              disabled={busy || !endpoint}
+              disabled={busy || !endpoint || !!state?.running}
               onClick={create}
             >
               {busy ? "接続中…" : "セッションを作成"}
@@ -432,6 +507,7 @@ function Host() {
             {session && (
               <button
                 onClick={() => {
+                  setIdentification(session.method || "smartphone");
                   restoreLayout(session.seatKeys.length, shape);
                   setPage("register");
                 }}
@@ -441,6 +517,17 @@ function Host() {
             )}
           </div>
         </section>
+      )}
+      {page !== "home" && (
+        <ResearchPanel
+          mode={identification}
+          setMode={setIdentification}
+          state={state}
+          session={session}
+          people={people}
+          mic={pcMic}
+          send={send}
+        />
       )}
       {page === "register" && (
         <section>
@@ -554,7 +641,12 @@ function Host() {
               均等配置に戻す
             </button>
           </div>
-          <Room people={people} layout={layout} setLayout={setLayout} />
+          <Room
+            people={people}
+            layout={layout}
+            setLayout={setLayout}
+            pc={identification === "reference"}
+          />
           <p role="status">{notice}</p>
           <div className="actions">
             <button onClick={save}>配置を保存</button>
@@ -583,7 +675,12 @@ function Host() {
           </p>
           <div className="dashboard">
             <div className="card">
-              <Room people={people} layout={layout} active={state?.active} />
+              <Room
+                people={people}
+                layout={layout}
+                active={state?.active}
+                pc={identification === "reference"}
+              />
             </div>
             <div className="card summary">
               <h3>発話量サマリー</h3>
@@ -614,7 +711,14 @@ function Host() {
               ))}
             </div>
           </div>
-          <AudioDiagnostics people={people} state={state} />
+          <AudioDiagnostics
+            people={
+              identification === "reference" && state?.pc
+                ? [...people, state.pc]
+                : people
+            }
+            state={state}
+          />
           <p>
             話者不明 {format(state?.unknownMs || 0)} · 判定信頼度{" "}
             {Math.round((state?.confidence || 0) * 100)}% ·{" "}
@@ -624,7 +728,9 @@ function Host() {
             <button
               disabled={
                 !connected ||
-                !people.some((p) => p.connected && p.registered && p.mic)
+                !people.some((p) => p.connected && p.registered && p.mic) ||
+                (identification === "reference" &&
+                  (!pcMic.active || !state?.research?.ready))
               }
               className="primary"
               onClick={() => send({ type: state?.running ? "stop" : "start" })}
@@ -657,6 +763,10 @@ function Host() {
         <section>
           <h1>会議のふり返り</h1>
           <p>
+            データ不足 {format(state?.missingMs || 0)} · 同時発話候補{" "}
+            {format(state?.overlapMs || 0)}
+          </p>
+          <p>
             話者不明 {format(state?.unknownMs || 0)} · 無音／受信不足{" "}
             {format(state?.silenceMs || 0)}
           </p>
@@ -684,7 +794,10 @@ function Host() {
               </button>
             )}
             {options.json && (
-              <button disabled={state?.running} onClick={() => download("json")}>
+              <button
+                disabled={state?.running}
+                onClick={() => download("json")}
+              >
                 JSON をダウンロード
               </button>
             )}
@@ -734,7 +847,14 @@ function Participant({ params }: { params: URLSearchParams }) {
   const media = useRef<MediaStream | null>(null),
     audio = useRef<AudioContext | null>(null),
     interval = useRef<ReturnType<typeof setInterval> | null>(null),
-    sample = useRef({ level: 0, vad: false, rawRms: 0, captured: 0 });
+    sample = useRef({
+      level: 0,
+      vad: false,
+      rawRms: 0,
+      captured: 0,
+      peak: 0,
+      clippedFraction: 0,
+    });
   const stop = () => {
     if (interval.current) clearInterval(interval.current);
     media.current?.getTracks().forEach((t) => t.stop());
@@ -742,7 +862,14 @@ function Participant({ params }: { params: URLSearchParams }) {
     media.current = null;
     audio.current = null;
     setMic(false);
-    sample.current = { level: 0, vad: false, rawRms: 0, captured: 0 };
+    sample.current = {
+      level: 0,
+      vad: false,
+      rawRms: 0,
+      captured: 0,
+      peak: 0,
+      clippedFraction: 0,
+    };
     collection.current = null;
     setPhase("");
     setLevel(0);
@@ -813,6 +940,9 @@ function Participant({ params }: { params: URLSearchParams }) {
         const rms = Math.sqrt(buf.reduce((s, x) => s + x * x, 0) / buf.length);
         const f = updateVad(voice.current, rms, 100, calibrationRef.current);
         sample.current = {
+          peak: Math.max(...buf.map((v) => Math.abs(v))),
+          clippedFraction:
+            buf.filter((v) => Math.abs(v) >= 0.999).length / buf.length,
           level: rms * 100,
           vad: f.vad,
           rawRms: rms,
@@ -914,12 +1044,22 @@ function Participant({ params }: { params: URLSearchParams }) {
               )
               .join(" · ")}
           </p>
+          {state?.research?.mode === "reference" && (
+            <p>
+              PC参照方式：静音と本人発話はホストの共同キャリブレーションSTEPに合わせてください。
+            </p>
+          )}
           <div className="calibration">
             <p>
               計測前に、端末の位置を固定して1台ずつ測定してください。発話測定中は本人だけが話してください。
             </p>
             <button
-              disabled={!mic || !!phase || !!state?.running}
+              disabled={
+                !mic ||
+                !!phase ||
+                !!state?.running ||
+                state?.research?.mode === "reference"
+              }
               onClick={() => {
                 calibrationRef.current = undefined;
                 setCalibration(undefined);
@@ -936,7 +1076,11 @@ function Participant({ params }: { params: URLSearchParams }) {
             </button>
             <button
               disabled={
-                !mic || !!phase || !!state?.running || !draft.current.noiseRms
+                !mic ||
+                !!phase ||
+                !!state?.running ||
+                !draft.current.noiseRms ||
+                state?.research?.mode === "reference"
               }
               onClick={() => {
                 collection.current = {

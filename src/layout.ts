@@ -4,6 +4,7 @@ export type Layout = {
   shape: "circle" | "rect";
   geometry: Geometry;
   positions: Position[];
+  pcPosition?: Position;
 };
 export const initialGeometry: Geometry = {
   x: 25,
@@ -37,6 +38,7 @@ export function seats(
 export function initialLayout(count: number, shape: "circle" | "rect"): Layout {
   return {
     shape,
+    pcPosition: { x: 50, y: 50 },
     geometry: { ...initialGeometry },
     positions: seats(count, shape, initialGeometry),
   };
@@ -48,13 +50,19 @@ export function csv(
     turns: number;
     unknownSeconds?: number;
     confidence?: number;
+    method?: string;
+    pcEnabled?: boolean;
+    pcSettings?: unknown;
+    calibration?: unknown;
+    missingSeconds?: number;
+    overlapSeconds?: number;
   }[],
 ) {
   return [
-    "name,speakingSeconds,turns,unknownSeconds,confidence",
+    "name,speakingSeconds,turns,unknownSeconds,confidence,method,pcEnabled,pcSettings,calibration,missingSeconds,overlapSeconds",
     ...rows.map(
       (r) =>
-        `"${r.name.replaceAll('"', '""')}",${r.speakingSeconds},${r.turns},${r.unknownSeconds ?? 0},${r.confidence ?? 0}`,
+        `"${r.name.replaceAll('"', '""')}",${r.speakingSeconds},${r.turns},${r.unknownSeconds ?? 0},${r.confidence ?? 0},${r.method ?? "smartphone"},${r.pcEnabled ?? false},"${JSON.stringify(r.pcSettings ?? {}).replaceAll('"', '""')}","${JSON.stringify(r.calibration ?? null).replaceAll('"', '""')}",${r.missingSeconds ?? 0},${r.overlapSeconds ?? 0}`,
     ),
   ].join("\r\n");
 }
